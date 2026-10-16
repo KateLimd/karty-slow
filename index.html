@@ -137,6 +137,9 @@ button{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .diff ins{color:var(--good);text-decoration:none;font-weight:600;display:block}
 .sugbox{background:var(--note);color:var(--note-ink);border-radius:10px;padding:12px 14px;margin:0 0 12px}
 .sugbox .diff dt{color:inherit;opacity:.8}
+.pick{display:inline-flex;gap:6px;align-items:center;cursor:pointer}.pick input{width:18px;height:18px;margin:0;accent-color:var(--good)}
+.mlist{margin:0;padding-left:20px;display:grid;gap:6px;font-size:15px}
+.pick-note{font-size:13px;color:var(--ink-2);margin:2px 0 0}.sugbox .pick-note{color:inherit;opacity:.8}
 .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}
 .tile{padding:12px 12px 10px}
 .tile b{display:block;font-family:Literata,Georgia,serif;font-size:26px;line-height:1.1;font-weight:600}
@@ -564,7 +567,7 @@ function manualSample(){const f=async()=>{throw {code:'invalid_request'}};f.manu
   return f;}
 const isManual=()=>!!(S.sample&&S.sample.manual);
 const aiTier=()=>S.profile.aiTier==='default'?'default':'quick';
-const aiParts=()=>Object.assign({ph:true,fm:true,ex:true},S.profile.aiParts||{});
+const aiParts=()=>Object.assign({pos:true,tp:true,ph:true,fm:true,ex:true},S.profile.aiParts||{});
 function looseJSON(t){t=String(t||'').trim();try{return JSON.parse(t)}catch(e){}
   const f=t.match(/```(?:json)?\s*([\s\S]*?)```/);if(f){try{return JSON.parse(f[1])}catch(e){}}
   const ia=t.indexOf('['),io=t.indexOf('{');const a=Math.min(ia<0?Infinity:ia,io<0?Infinity:io);const b=Math.max(t.lastIndexOf(']'),t.lastIndexOf('}'));
@@ -599,14 +602,22 @@ ${cards.map(cardLine).join('\n')}`;}
 async function aiCheck(cards,d,signal){
   const arr=asArr(await askJSON(checkPrompt(cards,d),signal));if(!arr)throw {code:'invalid_json'};
   const out=[];arr.forEach(o=>{if(!o||typeof o!=='object')return;const c=cards[(+o.n||0)-1];if(!c)return;const ch={};const fx=o.fix&&typeof o.fix==='object'?o.fix:{};
-    ['word','translation','pos'].forEach(f=>{const v=str(fx[f]);if(v&&v!==str(c[f]))ch[f]=v;});const note=str(o.note);if(!note&&!Object.keys(ch).length)return;out.push({card:c,note,changes:ch});});
+    const kp=c.keep||{};let kept=0;['word','translation','pos'].forEach(f=>{const v=str(fx[f]);if(v&&v!==str(c[f])){if(kp[f]!==undefined&&kp[f]===str(c[f])){kept++;return;}ch[f]=v;}});const note=str(o.note);if(!note&&!Object.keys(ch).length)return;
+    if(!Object.keys(ch).length&&(kept||(kp._note&&(c.editedAt||0)<=kp._note)))return;out.push({card:c,note,changes:ch});});
   return out;}
-function enrichPrompt(cards,d,P){return `Язык: ${langName(d)}, родной — русский. Для каждого слова верни только JSON-массив [{"n":номер, …}] в том же порядке, ключи: ${partsSpec(P).join('; ')}.
+function enrichPrompt(cards,d,P){const pe=posExamples(d),tp=topicNames(d);
+  const extra=[P.pos?`"p": часть речи${pe.length?' в формате: '+pe.join('; '):' (сущ., глаг., прил., …)'}`:'',P.tp?`"tp": одна тема${tp.length?' из: '+tp.join('; ')+' (новую — только если ни одна не подходит)':' (2–3 слова)'}`:''].filter(Boolean);
+  return `Язык: ${langName(d)}, родной — русский. Для каждого слова верни только JSON-массив [{"n":номер, …}] в том же порядке, ключи: ${extra.concat(partsSpec(P)).join('; ')}.
 ${cards.map((c,i)=>`${i+1}. ${baseWord(c)} — ${c.translation}${c.pos?' ('+c.pos+')':''}`).join('\n')}`;}
 const done=(c,k)=>!!(c.aiDone&&c.aiDone[k]);
 const missPh=c=>!isPhrase(c)&&!(c.phrases||[]).length&&!done(c,'ph');
 const missFm=c=>!isPhrase(c)&&!formsOf(c).length&&!done(c,'fm');
 const missEx=c=>!isPhrase(c)&&!(c.examples||[]).length&&!done(c,'ex');
+const missPos=c=>!str(c.pos)&&!done(c,'pos');
+const missTp=c=>!(c.topics||[]).length&&!done(c,'tp');
+const PARTS=[['pos',missPos],['tp',missTp],['ph',missPh],['fm',missFm],['ex',missEx]];
+const missKey=(c,P)=>PARTS.filter(([k,f])=>P[k]&&f(c)).map(([k])=>k).join(',');
+function pendingAI(cs,P){P=P||aiParts();const fill=cs.filter(c=>missKey(c,P)).length,chk=cs.filter(needsCheck).length;return {fill,chk,any:fill+chk};}
 
 /* ---------- background jobs ---------- */
 const FIELD={word:'Слово',translation:'Перевод',pos:'Часть речи'};
@@ -629,22 +640,43 @@ async function runCheck(cards){
 async function runEnrich(d,P){
   if(S.job&&!S.job.finished)return toast('Дождитесь окончания текущей задачи.');
   if(!aiReady())return toast(S.aiOff?S.aiOffMsg:'ИИ в этом окне недоступен.');
-  bsz();const groups=new Map();cardsOf(d.id).forEach(c=>{const k=[P.ph&&missPh(c)?'ph':'',P.fm&&missFm(c)?'fm':'',P.ex&&missEx(c)?'ex':''].filter(Boolean).join(',');if(!k)return;if(!groups.has(k))groups.set(k,[]);groups.get(k).push(c);});
+  bsz();const groups=new Map();cardsOf(d.id).forEach(c=>{const k=missKey(c,P);if(!k)return;if(!groups.has(k))groups.set(k,[]);groups.get(k).push(c);});
   const total=[...groups.values()].reduce((a,l)=>a+l.length,0);if(!total)return toast('Все карточки уже дополнены.');
   const job={kind:'enrich',total,done:0,found:0,ctl:new AbortController(),error:'',finished:false};S.job=job;refreshJob();
-  try{for(const [k,list] of groups){const GP={ph:k.includes('ph'),fm:k.includes('fm'),ex:k.includes('ex')};
+  const newTp=new Set();
+  try{for(const [k,list] of groups){const ks=k.split(','),GP={pos:ks.includes('pos'),tp:ks.includes('tp'),ph:ks.includes('ph'),fm:ks.includes('fm'),ex:ks.includes('ex')};
       for(let i=0;i<list.length;i+=ENRICH_B){if(job.ctl.signal.aborted)throw {code:'cancelled'};const batch=list.slice(i,i+ENRICH_B);
         const arr=asArr(await askJSON(enrichPrompt(batch,d,GP),job.ctl.signal));if(!arr)throw {code:'invalid_json'};const now=Date.now();
         const byN=new Map();arr.forEach(o=>{if(o&&typeof o==='object')byN.set(+o.n,o);});
         await pool(batch,async(c,j)=>{const cur=cardById(c.id);if(!cur)return;const o=byN.get(j+1)||arr[j]||{};const nc=clone(cur);nc.aiDone=Object.assign({},nc.aiDone);
+          if(GP.pos){const v=str(o.p||o.pos);if(v&&!str(cur.pos))nc.pos=v;nc.aiDone.pos=now;}
+          if(GP.tp){const v=str(o.tp||o.topic);if(v&&!(cur.topics||[]).length){nc.topics=[v];newTp.add(v);}nc.aiDone.tp=now;}
           if(GP.ph){const v=pairs(o.ph,'text','translation');if(v.length)nc.phrases=v;nc.aiDone.ph=now;}
           if(GP.fm){const v=pairs(o.fm,'l','f');if(v.length)nc.formsList=v;nc.aiDone.fm=now;}
           if(GP.ex){const v=exOf(o.ex);if(v.length)nc.examples=v;nc.aiDone.ex=now;}
           await Store.putCard(nc);},4);
         job.done+=batch.length;refreshJob();}}
   }catch(e){if(e&&e.code==='cancelled')job.ctl.abort();const m=handleAiErr(e);if(m)job.error=m;}
-  job.finished=true;refreshJob(true);
+  if(newTp.size){const dd=deckById(d.id);if(dd)addToDeckTopics(dd,[...newTp]);}
+  job.finished=true;refreshJob(true);return !job.error&&!job.ctl.signal.aborted;
 }
+/* one button: fill gaps, then check new and changed cards */
+async function runAll(deckIds){
+  if(S.job&&!S.job.finished)return toast('Дождитесь окончания текущей задачи.');
+  if(!aiReady())return toast(S.aiOff?S.aiOffMsg:'ИИ в этом окне недоступен.');
+  const P=aiParts();let did=false;
+  for(const id of deckIds){const d=deckById(id);if(!d)continue;if(!cardsOf(id).some(c=>missKey(c,P)))continue;did=true;const ok=await runEnrich(d,P);if(!ok)return;}
+  const chk=S.cards.filter(c=>deckIds.includes(c.deckId)&&needsCheck(c));
+  if(chk.length){did=true;await runCheck(chk);}
+  if(!did)toast('Всё уже обработано: пропусков нет, новые карточки проверены.');
+  else Store.putProfile(Object.assign({},S.profile,{lastAll:Date.now()}));
+}
+function allModal(deckIds){bsz();const P=aiParts(),cs=S.cards.filter(c=>deckIds.includes(c.deckId)),pn=pendingAI(cs,P);
+  const q=Math.ceil(pn.fill/ENRICH_B)+Math.ceil(pn.chk/CHECK_B);
+  openModal(`<h2 class="h2">Обработать новое ${AIB}</h2><p class="lede" style="margin:0">ИИ заполнит пустые поля и проверит новые и изменённые карточки. То, что уже сделано, он помнит и не повторяет.</p>
+<ul class="mlist"><li>Заполнить пропуски: <b>${pn.fill}</b> ${plural(pn.fill,K)}. Что заполнять — ⋯ набора → «Дополнить карточки».</li><li>Проверить на ошибки: <b>${pn.chk}</b> ${plural(pn.chk,K)}. Исправления придут замечаниями, сам ИИ ничего не меняет.</li></ul>
+<p class="mdesc" style="margin:0">${pn.any?`Около ${q} ${plural(q,R)}. Можно остановить: сделанное сохранится.`:'Сейчас обрабатывать нечего.'}</p>
+<div class="row"><button class="btn quiet" data-act="close-modal">Отмена</button><button class="btn" data-act="all-ok" data-ids="${esc(deckIds.join(','))}" ${pn.any&&aiReady()?'':'disabled'}>Обработать</button></div>`);}
 function refreshJob(final){if(!['home','deck','sugg','stats'].includes(S.screen))return;const el=$('#jobbar'),j=S.job;
   if(final||!el)return keepScroll();
   const g=el.querySelector('.grow'),bar=el.querySelector('.pbar span');
@@ -655,9 +687,12 @@ function jobBar(){const j=S.job;if(!j)return '<div id="jobbar" hidden></div>';
   let msg=j.kind==='check'?`Проверено ${j.done} ${plural(j.done,K)}. ${j.found?`Замечаний: ${j.found}.`:'Ошибок не найдено.'}`:j.kind==='enrich'?`Дополнено ${j.done} ${plural(j.done,K)}.`:`${j.label}: готово, ${j.done} ${plural(j.done,K)}.`;
   if(j.error)msg+=' '+j.error;else if(j.ctl.signal.aborted)msg+=' Остановлено, можно продолжить позже.';
   return `<div id="jobbar" class="ic jobbar" role="status"><div class="jt"><span class="grow">${esc(msg)}</span>${j.kind==='check'&&j.found?`<button class="btn small" data-act="open-sugg">Посмотреть</button>`:''}<button class="icon sm" data-act="job-close" aria-label="Скрыть">${ICON.close}</button></div></div>`;}
-function checkReminder(){if(!aiReady())return '';const n=S.cards.filter(needsCheck).length;const p=S.profile;
-  if(!n||Date.now()-(p.lastCheck||0)<7*DAY||Date.now()-(p.checkSnooze||0)<7*DAY||(S.job&&!S.job.finished))return '';
-  return `<div class="banner col"><span><b>${n} ${plural(n,K)} не проверены ИИ.</b> Проверка запускается только по кнопке: около ${Math.ceil(n/CHECK_B)} ${plural(Math.ceil(n/CHECK_B),R)}.</span><div class="row"><button class="btn small" data-act="check-now">Проверить ${AIB}</button><button class="btn small quiet" data-act="check-snooze">Напомнить через неделю</button></div></div>`;}
+function checkReminder(){if(!aiReady())return '';const pn=pendingAI(S.cards);const p=S.profile;
+  if(!pn.any||(S.job&&!S.job.finished))return '';
+  if(Date.now()-Math.max(p.lastCheck||0,p.lastAll||0)<7*DAY||Date.now()-(p.checkSnooze||0)<7*DAY)
+    return `<button class="btn quiet wide" data-act="home-all" style="margin:0 0 12px">Обработать новое ${AIB} (${pn.any} ${plural(pn.any,K)})</button>`;
+  const t=[pn.fill?`с пропусками: ${pn.fill}`:'',pn.chk?`не проверены: ${pn.chk}`:''].filter(Boolean).join(', ');
+  return `<div class="banner col"><span><b>Есть необработанные карточки</b> (${t}). ИИ запускается только по кнопке.</span><div class="row"><button class="btn small" data-act="check-now">Обработать ${AIB}</button><button class="btn small quiet" data-act="check-snooze">Напомнить через неделю</button></div></div>`;}
 
 /* ---------- rendering ---------- */
 function render(){
@@ -684,7 +719,7 @@ function backupReminder(){if(!SITE||!Store.local||!S.cards.length)return '';cons
   return `<div class="banner col"><span><b>Сохраните резервную копию.</b> Слова и прогресс хранятся только в этом телефоне; копия нужна на случай очистки данных Chrome или смены телефона.</span><div class="row"><button class="btn small" data-act="exp-backup">Скачать копию</button><button class="btn small quiet" data-act="backup-snooze">Позже</button></div></div>`;}
 function localStash(){try{const r=JSON.parse(localStorage.getItem('fc-data')||'null');return r&&Array.isArray(r.cards)&&r.cards.length?r:null;}catch(e){return null;}}
 function suggBanner(deckId){const n=S.sugg.filter(s=>(!deckId||s.deckId===deckId)&&cardById(s.cardId)).length;if(!n)return '';
-  return `<button class="banner" data-act="open-sugg"><span class="grow"><b>Замечания ИИ: ${n}.</b> Примите исправление или отклоните замечание.</span><span class="btn small">Открыть</span></button>`;}
+  return `<button class="banner" data-act="open-sugg"><span class="grow"><b>Замечания ИИ: ${n}.</b> Исправьте или оставьте как есть.</span><span class="btn small">Открыть</span></button>`;}
 function renderHome(){
   const st=streakNow();let total=0;S.decks.forEach(d=>total+=todayList(d.id).length);
   let h=`<header class="top"><h1 class="title">Мои слова</h1><button class="icon" data-act="help" aria-label="Инструкции">${ICON.help}</button><button class="icon" data-act="settings" aria-label="Настройки">${ICON.gear}</button></header>`;
@@ -822,9 +857,10 @@ function renderAdd(){
   }
   return h;
 }
-function diffHTML(c,ch){return `<dl class="diff">${Object.keys(ch).map(f=>`<dt>${FIELD[f]||f}</dt><dd><del>${esc(c[f]||'—')}</del><ins>${esc(ch[f])}</ins></dd>`).join('')}</dl>`;}
+function diffHTML(c,ch,sid){const ks=Object.keys(ch),multi=sid&&ks.length>1;
+  return `<dl class="diff">${ks.map(f=>`<dt>${multi?`<label class="pick"><input type="checkbox" checked data-sf="${esc(sid)}" value="${f}"> ${FIELD[f]||f}</label>`:(FIELD[f]||f)}</dt><dd><del>${esc(c[f]||'—')}</del><ins>${esc(ch[f])}</ins></dd>`).join('')}</dl>${multi?`<p class="pick-note">Снимите галочку с того, что исправлять не нужно.</p>`:''}`;}
 function suggActions(s){const has=s.changes&&Object.keys(s.changes).length;
-  return `<div class="row" style="margin:8px 0 0">${has?`<button class="btn small" data-act="sugg-accept" data-id="${esc(s.id)}">Принять</button><button class="btn small quiet" data-act="sugg-dismiss" data-id="${esc(s.id)}">Отклонить</button>`:`<button class="btn small quiet" data-act="sugg-dismiss" data-id="${esc(s.id)}">Понятно, убрать</button>`}</div>`;}
+  return `<div class="row" style="margin:8px 0 0">${has?`<button class="btn small" data-act="sugg-accept" data-id="${esc(s.id)}">Исправить</button>`:''}<button class="btn small quiet" data-act="sugg-dismiss" data-id="${esc(s.id)}">Оставить как есть</button>${S.screen==='sugg'?`<button class="btn small quiet" data-act="open-card" data-id="${esc(s.cardId)}">Изменить сама</button>`:''}</div>`;}
 function renderCard(){
   const c=cardById(S.cardId),d=c&&deckById(c.deckId);if(!c||!d||!S.edit){S.screen='deck';return renderDeck();}
   const e=S.edit,st=status(c),aiOk=aiReady(),sg=suggOf(c.id);
@@ -832,7 +868,7 @@ function renderCard(){
   const dueTxt=st==='new'?'':(due<=Date.now()?'к повторению сейчас':'следующий показ '+fmtDate(due));
   let h=`<header class="top"><button class="icon" data-act="card-back" aria-label="Назад">${ICON.back}</button><h1 class="title sm">${esc(c.word)}</h1>${sayBtn(c.word,d,'icon')}</header>`;
   h+=`<p class="lede">${c.num?`№ ${c.num}. `:''}${stl}${dueTxt?', '+dueTxt:''}.${c.checkedAt?' Проверена ИИ '+fmtDate(c.checkedAt)+'.':''}</p>`;
-  if(sg)h+=`<div class="sugbox"><b>Замечание ИИ.</b> ${esc(sg.note)}${sg.changes&&Object.keys(sg.changes).length?diffHTML(c,sg.changes):''}${suggActions(sg)}</div>`;
+  if(sg)h+=`<div class="sugbox"><b>Замечание ИИ.</b> ${esc(sg.note)}${sg.changes&&Object.keys(sg.changes).length?diffHTML(c,sg.changes,sg.id):''}${suggActions(sg)}</div>`;
   h+=`<div class="ic draft">${fieldsHTML('edit',0,e,d)}</div>`;
   if(e.busy)h+=`<div class="progress"><span class="spin" aria-hidden="true"></span><span class="ptxt">ИИ дополняет карточку…</span></div>`;
   if(e.err)h+=`<p class="err">${esc(e.err)}</p>`;
@@ -846,14 +882,15 @@ function renderSugg(){
   let h=`<header class="top"><button class="icon" data-act="sugg-back" aria-label="Назад">${ICON.back}</button><h1 class="title sm">Замечания ИИ</h1></header>`;
   h+=jobBar();
   if(!list.length)return h+`<div class="ic empty"><p>Замечаний нет.</p><button class="btn quiet" data-act="sugg-back">Назад</button></div>`;
-  h+=`<p class="lede">${list.length} ${plural(list.length,['замечание','замечания','замечаний'])}. «Принять» вносит исправление в карточку, «Отклонить» оставляет её как есть.</p>`;
-  h+=list.map(s=>{const c=cardById(s.cardId);return `<div class="ic sug"><div class="sug-head"><button class="sug-word" data-act="open-card" data-id="${esc(c.id)}">${esc(c.word)}</button><span class="sug-num">${c.num?'№ '+c.num+', ':''}${esc(c.translation)}</span></div><p class="sug-note">${esc(s.note)}</p>${s.changes&&Object.keys(s.changes).length?diffHTML(c,s.changes):''}${suggActions(s)}</div>`;}).join('');
+  h+=`<p class="lede">${list.length} ${plural(list.length,['замечание','замечания','замечаний'])}. «Исправить» вносит исправление, «Оставить как есть» ничего не меняет, и ИИ больше не будет это предлагать. «Изменить сама» открывает карточку.</p>`;
+  h+=list.map(s=>{const c=cardById(s.cardId);return `<div class="ic sug"><div class="sug-head"><button class="sug-word" data-act="open-card" data-id="${esc(c.id)}">${esc(c.word)}</button><span class="sug-num">${c.num?'№ '+c.num+', ':''}${esc(c.translation)}</span></div><p class="sug-note">${esc(s.note)}</p>${s.changes&&Object.keys(s.changes).length?diffHTML(c,s.changes,s.id):''}${suggActions(s)}</div>`;}).join('');
   return h;
 }
 
 /* ---------- help ---------- */
 function helpItems(){const site=SITE,art=HAS_AI&&!SITE,off=!!SEED;const it=[];
   if(site)it.push(['Установить на телефон',`<ol><li>Откройте ссылку приложения в Chrome.</li><li>⋮ → <b>Установить приложение</b>. Появится своя иконка.</li><li>Первый раз: <b>Загрузить копию</b> → файл «Мои слова — копия.json».</li></ol>`]);
+  it.push(['Обработать новое (ИИ)',`<ul><li>Кнопка <b>«Обработать новое»</b> на главном экране или ⋯ набора → «Обработать новое (всё сразу)».</li><li>ИИ заполняет пустые поля (часть речи, тема, выражения, формы, пример) и сразу сохраняет их в карточки.</li><li>Потом проверяет новые и изменённые карточки. Исправления приходят замечаниями, сам он ничего не меняет.</li><li>Что уже сделано, приложение помнит: повторно те же карточки не обрабатываются, лишние запросы не тратятся.</li></ul>`]);
   it.push(['Тренироваться',`<ul><li><b>На сегодня</b> — повторения по расписанию плюс новые карточки (сколько новых в день — в ⚙).</li><li><b>Настроить тренировку</b> — режим, что показывать сначала (русский или польский), темы, буква, порядок, сколько карточек, без грубых слов.</li><li>Во время тренировки кнопка <b>RU → PL</b> меняет сторону.</li></ul>`]);
   it.push(['Режимы',`<ul><li><b>Карточки</b> — перевернули, оценили себя.</li><li><b>Выбор ответа</b> — один из четырёх.</li><li><b>Написание</b> — видите перевод, пишете слово.</li><li><b>На слух</b> — голос телефона, выбираете перевод.</li><li><b>Пропуск</b> — вписать слово в идиому или пример.</li><li><b>Формы</b> — вписать нужную форму (мн. ч., падеж, время).</li><li><b>Выражения</b> — листать устойчивые выражения.</li></ul>`]);
   it.push(['Как работают повторения',`<ul><li><b>Знаю</b> — карточка вернётся через 1, 3, 8… дней, интервал растёт.</li><li><b>Сомневаюсь</b> — вернётся раньше.</li><li><b>Не помню</b> — повторится в этом же раунде и снова завтра.</li><li>Карточка считается выученной, когда интервал дошёл до 21 дня.</li></ul>`]);
@@ -861,7 +898,7 @@ function helpItems(){const site=SITE,art=HAS_AI&&!SITE,off=!!SEED;const it=[];
   it.push(['Править карточку',`<ul><li>Нажмите слово в списке набора.</li><li><b>Формы для тренировки</b>: по одной в строке «мн. ч. — ssaki».</li><li><b>Пример</b>: нужное слово в [скобках] — «Podjęłam trudną [decyzję]. — Я приняла трудное решение».</li><li><b>Сбросить прогресс</b> — карточка снова новая.</li></ul>`]);
   if(site)it.push(['Включить ИИ',`<p>ИИ нужен только для проверки и дополнения карточек и работает только по кнопкам с меткой ${AIB}. Нужен интернет.</p><p><b>Через Claude</b> (входит в подписку): ⚙ → Помощь ИИ → «Через Claude». При запуске: «Отправить в Claude» → выберите Claude → скопируйте ответ → вставьте → «Применить ответ».</p><p><b>Ключ API</b> (автоматически, платится отдельно, копейки): на platform.claude.com создайте ключ и пополните баланс → ⚙ → Помощь ИИ → «Ключ API» → вставьте ключ → «Сохранить ключ». Советую поставить лимит расходов в аккаунте.</p>`]);
   if(art)it.push(['ИИ',`<p>Работает только по кнопкам с меткой ${AIB} и расходует лимит подписки Claude. Режим «Экономно / Точнее» — в ⚙.</p>`]);
-  if(site||art)it.push(['Проверить и дополнить с ИИ',`<ul><li><b>Проверка</b>: ⋯ набора → «Проверить новые и изменённые» (или весь набор). ИИ ничего не меняет сам.</li><li><b>Замечания</b>: жёлтый баннер → «Принять» вносит исправление, «Отклонить» оставляет как есть.</li><li><b>Дополнить</b>: ⋯ набора → «Дополнить карточки» → выберите выражения, формы, пример. Дописывается только то, чего нет.</li><li>Раз в неделю приложение напомнит о непроверенных карточках — проверка не запускается сама.</li></ul>`]);
+  if(site||art)it.push(['Проверить и дополнить с ИИ',`<ul><li><b>Проверка</b>: ⋯ набора → «Проверить новые и изменённые» (или весь набор). ИИ ничего не меняет сам.</li><li><b>Замечания</b>: жёлтый баннер → «Исправить» вносит исправление, «Оставить как есть» ничего не меняет, и ИИ это больше не предлагает. Если в замечании несколько полей, снимите галочку с того, что не нужно. «Изменить сама» — исправить по-своему.</li><li><b>Дополнить</b>: ⋯ набора → «Дополнить карточки» → выберите выражения, формы, пример. Дописывается только то, чего нет.</li><li>Раз в неделю приложение напомнит о непроверенных карточках — проверка не запускается сама.</li></ul>`]);
   it.push(['Без интернета',`<p>${site?'После первого открытия работает всё, кроме ИИ и чтения Excel при первом использовании. Прогресс сохраняется в телефоне сразу.':off?'Этот файл работает без интернета целиком, ИИ в нём нет.':'Само приложение на claude.ai без интернета не откроется. Если связь пропала во время работы, изменения сохранятся и отправятся позже. Для работы офлайн: ⚙ → «Скачать офлайн-версию».'}</p>`]);
   it.push(['Резервная копия и перенос',`<ul><li>${site?'Слова и прогресс хранятся только в этом телефоне.':'Данные хранятся в вашем аккаунте Claude.'}</li><li>⚙ → <b>Скачать резервную копию</b> — файл со всем.${site?' Приложение напомнит раз в две недели.':''}</li><li>⚙ → <b>Загрузить резервную копию</b> — объединяет: новое добавляется, из совпадающих остаётся более позднее, ничего не удаляется.</li><li>Новый телефон: скачайте копию на старом → установите приложение на новом → загрузите копию.</li><li>Таблица слов: ⋯ набора → <b>Экспорт в Excel</b>.</li></ul>`]);
   it.push(['Обновления приложения',`<p>${site?'Обновляется само: когда я что-то меняю, новая версия загружается при открытии с интернетом. Не видно изменений — закройте приложение полностью и откройте ещё раз. Слова и прогресс при обновлении не теряются.':'Обновляется само при следующем открытии. Слова и прогресс при обновлении не теряются.'}</p><p>Чтобы что-то изменить в приложении, напишите Claude, что поменять.</p>`]);
@@ -1051,13 +1088,13 @@ ${seg('aiMode',[{id:'off',name:'Выключен'},{id:'manual',name:'Через
     h+=`<button class="btn quiet wide" data-act="check-now" ${pending&&ok?'':'disabled'}>Проверить новые и изменённые${pending?` (${pending})`:''} ${AIB}</button>`;}
   return h+'</div>';}
 function enrichModal(){const d=deckById(S.deckId);if(!d)return;bsz();const P=aiParts(),cs=cardsOf(d.id);
-  const c1=cs.filter(missPh).length,c2=cs.filter(missFm).length,c3=cs.filter(missEx).length;
-  const target=cs.filter(c=>(P.ph&&missPh(c))||(P.fm&&missFm(c))||(P.ex&&missEx(c)));
-  const groups=new Map();target.forEach(c=>{const k=[P.ph&&missPh(c),P.fm&&missFm(c),P.ex&&missEx(c)].join();groups.set(k,(groups.get(k)||0)+1);});
+  const c1=cs.filter(missPh).length,c2=cs.filter(missFm).length,c3=cs.filter(missEx).length,c4=cs.filter(missPos).length,c5=cs.filter(missTp).length;
+  const target=cs.filter(c=>missKey(c,P));
+  const groups=new Map();target.forEach(c=>{const k=missKey(c,P);groups.set(k,(groups.get(k)||0)+1);});
   const req=[...groups.values()].reduce((a,n)=>a+Math.ceil(n/ENRICH_B),0);
   const tg=(k,name,n)=>`<button class="toggle" data-act="part" data-k="${k}" aria-pressed="${!!P[k]}"><span class="box">${P[k]?'✓':''}</span><span class="grow">${name}</span><span class="cnt">не хватает у ${n}</span></button>`;
-  openModal(`<h2 class="h2">Дополнить карточки ${AIB}</h2><p class="lede" style="margin:0">ИИ допишет только то, чего в карточке ещё нет. Выражения-идиомы не дополняются.</p>
-${tg('ph','Устойчивые выражения',c1)}${tg('fm','Формы для тренировки',c2)}${tg('ex','Пример с пропуском',c3)}
+  openModal(`<h2 class="h2">Дополнить карточки ${AIB}</h2><p class="lede" style="margin:0">ИИ допишет только пустые поля и запомнит, что уже сделано. Выражения-идиомы не дополняются.</p>
+${tg('pos','Часть речи',c4)}${tg('tp','Тема',c5)}${tg('ph','Устойчивые выражения',c1)}${tg('fm','Формы для тренировки',c2)}${tg('ex','Пример с пропуском',c3)}
 <p class="mdesc" style="margin:0">${target.length?`${target.length} ${plural(target.length,K)}, около ${req} ${plural(req,R)}. Можно остановить и продолжить позже: сделанное сохранится.`:'Нечего дополнять.'}</p>
 <div class="row"><button class="btn quiet" data-act="close-modal">Отмена</button><button class="btn" data-act="enrich-ok" ${target.length&&aiReady()?'':'disabled'}>Дополнить</button></div>`);}
 
@@ -1106,7 +1143,10 @@ const A={
   help:()=>{closeModal();go('help');},
   settings:()=>settingsModal(),
   pset:el=>{const k=el.dataset.k,v=el.dataset.v;const p=Object.assign({},S.profile);p[k]=k==='dailyNew'?+v:v;Store.putProfile(p);settingsModal();if(S.screen!=='train')keepScroll();},
-  'check-now':()=>{closeModal();runCheck(S.cards.filter(needsCheck));},
+  'check-now':()=>{closeModal();allModal(S.decks.map(d=>d.id));},
+  'home-all':()=>allModal(S.decks.map(d=>d.id)),
+  'deck-all':()=>{closeModal();allModal([S.deckId]);},
+  'all-ok':el=>{const ids=(el.dataset.ids||'').split(',').filter(Boolean);closeModal();runAll(ids);},
   'check-snooze':()=>{Store.putProfile(Object.assign({},S.profile,{checkSnooze:Date.now()}));keepScroll();},
   'exp-offline':()=>{closeModal();exportOffline();},
   'exp-backup':()=>{closeModal();exportBackup();},
@@ -1135,6 +1175,7 @@ ${HAS_AI?'<div class="grp"><div class="gt">Без ИИ</div>':'<div class="grp">
 <button class="btn quiet wide" data-act="export-xlsx">Экспорт в Excel</button>
 <button class="btn quiet wide" data-act="rename-deck">Изменить название и язык</button></div>
 ${HAS_AI?`<div class="grp"><div class="gt">С помощью ИИ ${AIB}</div>
+<button class="btn quiet wide" data-act="deck-all" ${ok?'':'disabled'}>Обработать новое (всё сразу)</button>
 <button class="btn quiet wide" data-act="enrich" ${ok?'':'disabled'}>Дополнить карточки</button>
 <button class="btn quiet wide" data-act="deck-check" ${ok&&pend?'':'disabled'}>${pend?`Проверить новые и изменённые (${pend})`:'Новые карточки уже проверены'}</button>
 <button class="btn quiet wide" data-act="deck-check-all" ${ok?'':'disabled'}>Проверить весь набор (${cs.length})</button>
@@ -1151,10 +1192,18 @@ ${ok?'':`<p class="mdesc" style="margin:0">${esc(S.aiOff?S.aiOffMsg:'В этом
   'job-close':()=>{if(S.job&&S.job.finished){S.job=null;keepScroll();}},
   'open-sugg':()=>{S.suggFrom=S.screen;S.suggAll=S.screen==='home';go('sugg');},
   'sugg-back':()=>go(S.suggFrom==='deck'&&deckById(S.deckId)?'deck':'home'),
-  'sugg-accept':el=>{const s=S.sugg.find(x=>x.id===el.dataset.id);if(!s)return;const c=cardById(s.cardId);if(c){const nc=clone(c);Object.assign(nc,s.changes||{});nc.checkedAt=Date.now();Store.putCard(nc);
-      if(S.edit&&S.cardId===c.id)Object.keys(s.changes||{}).forEach(f=>S.edit[f]=s.changes[f]);}
-    Store.delSugg(s.id);toast('Исправление внесено.');keepScroll();},
-  'sugg-dismiss':el=>{const s=S.sugg.find(x=>x.id===el.dataset.id);if(!s)return;Store.delSugg(s.id);toast('Замечание убрано.');keepScroll();},
+  'sugg-accept':el=>{const s=S.sugg.find(x=>x.id===el.dataset.id);if(!s)return;const c=cardById(s.cardId);const all=Object.keys(s.changes||{});
+    const boxes=[...document.querySelectorAll('input[data-sf]')].filter(b=>b.dataset.sf===s.id);const pick=boxes.length?boxes.filter(b=>b.checked).map(b=>b.value):all;
+    if(!pick.length)return toast('Ничего не отмечено. Если исправлять не нужно, нажмите «Оставить как есть».');
+    if(c){const nc=clone(c),now=Date.now();pick.forEach(f=>nc[f]=s.changes[f]);const skip=all.filter(f=>!pick.includes(f));
+      if(skip.length){nc.keep=Object.assign({},c.keep);skip.forEach(f=>nc.keep[f]=str(c[f]));}
+      nc.checkedAt=now;Store.putCard(nc);
+      if(S.edit&&S.cardId===c.id)pick.forEach(f=>S.edit[f]=s.changes[f]);}
+    Store.delSugg(s.id);toast(pick.length<all.length?'Отмеченное исправлено, остальное оставлено.':'Исправление внесено.');keepScroll();},
+  'sugg-dismiss':el=>{const s=S.sugg.find(x=>x.id===el.dataset.id);if(!s)return;const c=cardById(s.cardId);
+    if(c){const nc=clone(c),now=Date.now();nc.keep=Object.assign({},c.keep);const ks=Object.keys(s.changes||{});
+      if(ks.length)ks.forEach(f=>nc.keep[f]=str(c[f]));else nc.keep._note=now;nc.checkedAt=Math.max(nc.checkedAt||0,now);Store.putCard(nc);}
+    Store.delSugg(s.id);toast('Оставлено как есть. ИИ больше не будет это предлагать.');keepScroll();},
   'rename-deck':()=>deckModal(deckById(S.deckId)),
   'save-deck':el=>{const name=$('#f-name').value.trim(),lang=$('#f-lang').value,custom=$('#f-custom').value.trim();
     if(!name){$('#f-name').focus();return toast('Введите название набора.');}if(lang==='other'&&!custom){$('#f-custom').focus();return toast('Укажите язык.');}
